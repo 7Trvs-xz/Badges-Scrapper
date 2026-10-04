@@ -15,10 +15,13 @@ import moment from 'moment';
 import axios from 'axios';
 import fs from 'fs/promises';
 import { config } from './config.js';
-import { BADGE_EMOJIS, SCRAP_BADGES, NITRO_DURATION_BADGES, HQ_BADGES } from './utils/badgeUtils.js';
+import { SCRAP_BADGE_KEYS, NITRO_DURATION_BADGES, HQ_BADGES } from './utils/badgeUtils.js';
+import { syncGuildEmojis, forgetGuild, isRequiredEmoji, getBadgeEmojis, getScrapBadges } from './utils/emojiManager.js';
 
 const client = new Client({ checkUpdate: false });
-const bot = new BotClient({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages] });
+const bot = new BotClient({
+    intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.GuildExpressions]
+});
 
 let state = {
     scraping: false,
@@ -98,7 +101,7 @@ async function startScraping(guildId, statusMessage, useHQ = false) {
         const elapsed = Math.round((Date.now() - state.startTime) / 1000);
         const min = Math.floor(elapsed / 60);
         const sec = elapsed % 60;
-        await statusMessage.edit(`Complete — ${state.found} profiles found in ${min}m${sec}s${useHQ ? ' (HQ)' : ''}`);
+        await statusMessage.edit(`Complete ${state.found} profiles found in ${min}m${sec}s${useHQ ? ' (HQ)' : ''}`);
     }
 }
 
@@ -124,6 +127,21 @@ bot.on('ready', async () => {
 
     await bot.application.commands.create(command, config.command_guild_id);
     console.log('/scrap registered');
+
+    for (const guild of bot.guilds.cache.values()) {
+        await syncGuildEmojis(guild).catch(e => console.error(`[EMOJI] ${guild.name}: ${e.message}`));
+    }
+});
+
+bot.on('guildCreate', (guild) => {
+    syncGuildEmojis(guild).catch(e => console.error(`[EMOJI] ${guild.name}: ${e.message}`));
+});
+
+bot.on('guildDelete', (guild) => forgetGuild(guild.id));
+
+bot.on('emojiDelete', (emoji) => {
+    if (!isRequiredEmoji(emoji.name)) return;
+    syncGuildEmojis(emoji.guild).catch(e => console.error(`[EMOJI] ${emoji.guild.name}: ${e.message}`));
 });
 
 bot.on('interactionCreate', async (interaction) => {
@@ -228,7 +246,7 @@ async function processMember(memberId, invite, proxyIP, index) {
                 return null;
             }
 
-            const scraped = cleaned.filter(b => SCRAP_BADGES[b]);
+            const scraped = cleaned.filter(b => SCRAP_BADGE_KEYS.includes(b));
             if (scraped.length === 0) return null;
 
             console.log(`[${index + 1}/${state.total}] ${data.user.globalName || data.user.username}`);
@@ -237,7 +255,6 @@ async function processMember(memberId, invite, proxyIP, index) {
                 user: data.user,
                 profile: data.profile,
                 scrapedBadges: scraped,
-                emojis: scraped.map(b => SCRAP_BADGES[b]).join(' '),
                 boost: data.boost,
                 invite,
                 progress: `${index + 1}/${state.total}`
@@ -263,6 +280,11 @@ async function processMember(memberId, invite, proxyIP, index) {
 }
 
 async function sendProfile(data) {
+    const channel = await bot.channels.fetch(config.channel_id);
+    const BADGE_EMOJIS = getBadgeEmojis(channel.guildId);
+    const SCRAP_BADGES = getScrapBadges(channel.guildId);
+    const emojis = data.scrapedBadges.map(b => SCRAP_BADGES[b] || `\`${b}\``).join(' ');
+
     const container = new ContainerBuilder().setAccentColor(0x000000);
 
     const header = new SectionBuilder()
@@ -283,7 +305,7 @@ async function sendProfile(data) {
 
     container.addTextDisplayComponents(
         new TextDisplayBuilder().setContent(
-            `**Badges**\n${data.emojis || 'None'}`
+            `**Badges**\n${emojis || 'None'}`
         )
     );
 
@@ -331,7 +353,6 @@ async function sendProfile(data) {
         )
     );
 
-    const channel = await bot.channels.fetch(config.channel_id);
     await channel.send({
         components: [container],
         flags: MessageFlags.IsComponentsV2
